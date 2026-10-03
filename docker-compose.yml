@@ -1,0 +1,415 @@
+﻿name: happyheadlines
+
+# Fælles opsætning for artikeldatabaserne
+x-database: &database
+  image: postgres:17-alpine
+  environment:
+    POSTGRES_USER: articles
+    POSTGRES_PASSWORD: articles_dev_password
+    POSTGRES_DB: articles
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U articles -d articles"]
+    interval: 5s
+    timeout: 5s
+    retries: 20
+
+# Fælles API- og monitoring-opsætning
+x-api-environment: &api-environment
+  ASPNETCORE_URLS: "http://+:8080"
+  Monitoring__SeqUrl: "http://seq:5341"
+  Monitoring__ZipkinEndpoint: "http://zipkin:9411/api/v2/spans"
+
+# Fælles RabbitMQ-opsætning
+x-messaging-environment: &messaging-environment
+  <<: *api-environment
+  ConnectionStrings__RabbitMQ: "host=rabbitmq;username=happyheadlines;password=happyheadlines_dev_password;publisherConfirms=true;timeout=10"
+
+# Tjekker at API-porten er åbnet efter serviceopstart
+x-api-healthcheck: &api-healthcheck
+  test: ["CMD", "bash", "-c", "echo > /dev/tcp/127.0.0.1/8080"]
+  interval: 5s
+  timeout: 3s
+  retries: 30
+  start_period: 15s
+
+services:
+  article-service:
+    build:
+      context: .
+      dockerfile: ArticleService/Dockerfile
+    environment:
+      <<: *messaging-environment
+      ConnectionStrings__Europe: "Host=db-europe;Database=articles;Username=articles;Password=articles_dev_password"
+      ConnectionStrings__Asia: "Host=db-asia;Database=articles;Username=articles;Password=articles_dev_password"
+      ConnectionStrings__Africa: "Host=db-africa;Database=articles;Username=articles;Password=articles_dev_password"
+      ConnectionStrings__NorthAmerica: "Host=db-north-america;Database=articles;Username=articles;Password=articles_dev_password"
+      ConnectionStrings__SouthAmerica: "Host=db-south-america;Database=articles;Username=articles;Password=articles_dev_password"
+      ConnectionStrings__Oceania: "Host=db-oceania;Database=articles;Username=articles;Password=articles_dev_password"
+      ConnectionStrings__Antarctica: "Host=db-antarctica;Database=articles;Username=articles;Password=articles_dev_password"
+      ConnectionStrings__Global: "Host=db-global;Database=articles;Username=articles;Password=articles_dev_password"
+      ConnectionStrings__Redis: "redis:6379,abortConnect=false"
+      Caching__WorkerOnly: "false"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db-europe:
+        condition: service_healthy
+      db-asia:
+        condition: service_healthy
+      db-africa:
+        condition: service_healthy
+      db-north-america:
+        condition: service_healthy
+      db-south-america:
+        condition: service_healthy
+      db-oceania:
+        condition: service_healthy
+      db-antarctica:
+        condition: service_healthy
+      db-global:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck: *api-healthcheck
+    deploy:
+      replicas: 3
+
+  load-balancer:
+    image: nginx:stable-alpine
+    ports:
+      - "8090:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      article-service:
+        condition: service_healthy
+    restart: on-failure
+
+  publisher-service:
+    build:
+      context: .
+      dockerfile: PublisherService/Dockerfile
+    ports:
+      - "8094:8080"
+    environment:
+      <<: *messaging-environment
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      article-service:
+        condition: service_healthy
+      newsletter-service:
+        condition: service_healthy
+
+  newsletter-service:
+    build:
+      context: .
+      dockerfile: NewsletterService/Dockerfile
+    ports:
+      - "8095:8080"
+    environment:
+      <<: *messaging-environment
+      ConnectionStrings__NewsletterDatabase: "Host=db-newsletters;Database=newsletters;Username=newsletters;Password=newsletters_dev_password;Timeout=3"
+      ArticleService__BaseUrl: "http://load-balancer/"
+      Smtp__Host: "mailpit"
+      Smtp__Port: "1025"
+      Smtp__From: "news@happyheadlines.test"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db-newsletters:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+    healthcheck: *api-healthcheck
+
+  comment-service:
+    build:
+      context: .
+      dockerfile: CommentService/Dockerfile
+    ports:
+      - "8091:8080"
+    environment:
+      <<: *api-environment
+      ConnectionStrings__CommentDatabase: "Host=db-comments;Database=comments;Username=comments;Password=comments_dev_password;Timeout=3"
+      ProfanityService__BaseUrl: "http://profanity-service:8080/"
+      ConnectionStrings__Redis: "redis:6379,abortConnect=false"
+      ArticleService__BaseUrl: "http://load-balancer/"
+    depends_on:
+      db-comments:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: 1.0
+
+  profanity-service:
+    build:
+      context: .
+      dockerfile: ProfanityService/Dockerfile
+    ports:
+      - "8092:8080"
+    environment:
+      <<: *api-environment
+      ConnectionStrings__ProfanityDatabase: "Host=db-profanity;Database=profanity;Username=profanity;Password=profanity_dev_password;Timeout=3"
+    depends_on:
+      db-profanity:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: 1.0
+
+  draft-service:
+    build:
+      context: .
+      dockerfile: DraftService/Dockerfile
+    ports:
+      - "8093:8080"
+    environment:
+      <<: *api-environment
+      ConnectionStrings__DraftDatabase: "Host=db-drafts;Database=drafts;Username=drafts;Password=drafts_dev_password;Timeout=3"
+    depends_on:
+      db-drafts:
+        condition: service_healthy
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    hostname: rabbitmq
+    ports:
+      - "127.0.0.1:15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: happyheadlines
+      RABBITMQ_DEFAULT_PASS: happyheadlines_dev_password
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "127.0.0.1:8025:8025"
+
+  db-europe:
+    <<: *database
+    volumes:
+      - europe-data:/var/lib/postgresql/data
+      - ./database/articles-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  db-asia:
+    <<: *database
+    volumes:
+      - asia-data:/var/lib/postgresql/data
+      - ./database/articles-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  db-africa:
+    <<: *database
+    volumes:
+      - africa-data:/var/lib/postgresql/data
+      - ./database/articles-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  db-north-america:
+    <<: *database
+    volumes:
+      - north-america-data:/var/lib/postgresql/data
+      - ./database/articles-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  db-south-america:
+    <<: *database
+    volumes:
+      - south-america-data:/var/lib/postgresql/data
+      - ./database/articles-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  db-oceania:
+    <<: *database
+    volumes:
+      - oceania-data:/var/lib/postgresql/data
+      - ./database/articles-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  db-antarctica:
+    <<: *database
+    volumes:
+      - antarctica-data:/var/lib/postgresql/data
+      - ./database/articles-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  db-global:
+    <<: *database
+    volumes:
+      - global-data:/var/lib/postgresql/data
+      - ./database/articles-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  db-comments:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: comments
+      POSTGRES_PASSWORD: comments_dev_password
+      POSTGRES_DB: comments
+    volumes:
+      - comments-data:/var/lib/postgresql/data
+      - ./database/comments-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U comments -d comments"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  db-profanity:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: profanity
+      POSTGRES_PASSWORD: profanity_dev_password
+      POSTGRES_DB: profanity
+    volumes:
+      - profanity-data:/var/lib/postgresql/data
+      - ./database/profanity-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U profanity -d profanity"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  db-drafts:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: drafts
+      POSTGRES_PASSWORD: drafts_dev_password
+      POSTGRES_DB: drafts
+    volumes:
+      - drafts-data:/var/lib/postgresql/data
+      - ./database/drafts-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drafts -d drafts"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  db-newsletters:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: newsletters
+      POSTGRES_PASSWORD: newsletters_dev_password
+      POSTGRES_DB: newsletters
+    volumes:
+      - newsletters-data:/var/lib/postgresql/data
+      - ./database/newsletter-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U newsletters -d newsletters"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  seq:
+    image: datalust/seq
+    ports:
+      - "127.0.0.1:5341:5341"
+      - "127.0.0.1:5342:80"
+    environment:
+      ACCEPT_EULA: "Y"
+      SEQ_FIRSTRUN_NOAUTHENTICATION: "True"
+    volumes:
+      - seq-data:/data
+
+  zipkin:
+    image: openzipkin/zipkin
+    ports:
+      - "127.0.0.1:9411:9411"
+    environment:
+      STORAGE_TYPE: mysql
+      MYSQL_HOST: zipkin-storage
+      MYSQL_DB: zipkin
+      MYSQL_USER: zipkin
+      MYSQL_PASS: zipkin
+    depends_on:
+      - zipkin-storage
+    restart: on-failure
+
+  zipkin-storage:
+    image: openzipkin/zipkin-mysql
+    volumes:
+      - zipkin-data:/mysql/data
+        
+  redis:
+    image: redis:7-alpine
+    command: [ "redis-server", "--save", "", "--appendonly", "no" ]
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      
+  prometheus:
+    image: prom/prometheus:v3.7.0
+    
+    ports:
+      # Prometheus' brugerflade tilgås fra din egen computer.
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus      # Gem målehistorikken mellem genstarter.
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus" 
+    depends_on:
+      comment-service:
+        condition: service_started
+        
+  grafana:
+    image: grafana/grafana:12.2.0
+    ports:
+      # Åbn Grafana fra din computer på port 3000.
+      - "127.0.0.1:3000:3000"
+    volumes:
+      # Bevar Grafanas database med brugere og indstillinger.
+      - grafana-data:/var/lib/grafana
+
+      # Indlæs datakilden og dashboard-provider fra projektfiler.
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+
+      # Gør dashboardets JSON-fil tilgængelig i containeren.
+      - ./observability/grafana/cache-dashboard.json:/var/lib/grafana/dashboards/cache-dashboard.json:ro
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+      
+  article-cache-worker:
+    build:
+      context: .
+      dockerfile: ArticleService/Dockerfile
+    environment:
+      <<: *api-environment
+      Caching__WorkerOnly: "true"
+      # Workeren læser kun globale artikler.
+      ConnectionStrings__Global: "Host=db-global;Database=articles;Username=articles;Password=articles_dev_password"
+      # Samme Redis-server som de tre API-instanser bruger.
+      ConnectionStrings__Redis: "redis:6379,abortConnect=false"
+    depends_on:
+      redis:
+        condition: service_healthy
+      db-global:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  europe-data:
+  asia-data:
+  africa-data:
+  north-america-data:
+  south-america-data:
+  oceania-data:
+  antarctica-data:
+  global-data:
+  comments-data:
+  profanity-data:
+  drafts-data:
+  newsletters-data:
+  rabbitmq-data:
+  seq-data:
+  zipkin-data:
+  prometheus-data:
+  grafana-data:
+  

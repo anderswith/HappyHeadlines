@@ -1,0 +1,11 @@
+﻿global:
+  # Hent målinger hvert femte sekund.
+  scrape_interval: 5s
+  scrape_timeout: 4s
+
+scrape_configs:
+  - job_name: "happyheadlines-cache"
+    metrics_path: /metrics
+    static_configs:
+      # CommentService leverer målinger for begge caches.
+      - targets: ["comment-service:8080"]
